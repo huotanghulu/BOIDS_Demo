@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BOIDS - 鱼群算法</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
+    <style>
+        :root {
+            --bg-color: #f4efe2;      
+            --text-color: #2b303a;    
+        }
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: 'Inter', sans-serif;
+            overflow: hidden;
+            user-select: none;
+        }
+        .fullscreen-ui {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            z-index: 10;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8vh 4vw;
+            box-sizing: border-box;
+        }
+        .interactive { pointer-events: auto; }
+        .floating-text-container { transition: all 0.6s cubic-bezier(0.16, 1, 0.3, 1); }
+        .floating-item {
+            filter: drop-shadow(18px 24px 0px rgba(43, 48, 58, 0.055));
+            transition: transform 0.6s cubic-bezier(0.16, 1, 0.3, 1), filter 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        .floating-item:hover {
+            transform: translateY(-8px);
+            filter: drop-shadow(26px 32px 0px rgba(43, 48, 58, 0.08));
+        }
+        .disturb-inner { transition: none !important; will-change: transform; }
+        #canvas-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; }
+    </style>
+</head>
+<body>
+
+    <div id="canvas-container"></div>
+
+    <div class="fullscreen-ui">
+        <header class="text-center"></header>
+
+        <div class="interactive floating-text-container flex items-center justify-around max-w-4xl w-full mb-8" id="force-controls-container">
+            <div class="group cursor-pointer flex flex-col items-center text-center floating-item px-8 py-4" id="btn-sep" data-force="separation">
+                <div id="btn-sep-inner" class="disturb-inner flex flex-col items-center text-center pointer-events-none">
+                    <span class="text-4xl font-extrabold tracking-tight text-stone-800/90 transition-colors duration-300 group-hover:text-red-800">分离力</span>
+                    <span class="text-[11px] font-bold tracking-widest text-stone-500/60 mt-3 transition-colors duration-300 group-hover:text-red-700">fₛ = -⅀(pₙ - p)/d²</span>
+                </div>
+            </div>
+            <div class="group cursor-pointer flex flex-col items-center text-center floating-item px-8 py-4" id="btn-ali" data-force="alignment">
+                <div id="btn-ali-inner" class="disturb-inner flex flex-col items-center text-center pointer-events-none">
+                    <span class="text-4xl font-extrabold tracking-tight text-stone-800/90 transition-colors duration-300 group-hover:text-emerald-800">对齐力</span>
+                    <span class="text-[11px] font-bold tracking-widest text-stone-500/60 mt-3 transition-colors duration-300 group-hover:text-emerald-700">fₐ = v̄ - v</span>
+                </div>
+            </div>
+            <div class="group cursor-pointer flex flex-col items-center text-center floating-item px-8 py-4" id="btn-coh" data-force="cohesion">
+                <div id="btn-coh-inner" class="disturb-inner flex flex-col items-center text-center pointer-events-none">
+                    <span class="text-4xl font-extrabold tracking-tight text-stone-800/90 transition-colors duration-300 group-hover:text-amber-800">凝聚力</span>
+                    <span class="text-[11px] font-bold tracking-widest text-stone-500/60 mt-3 transition-colors duration-300 group-hover:text-amber-700">f꜀ = p̄ - p</span>
+                </div>
+            </div>
+        </div>
+
+        <footer class="text-center"></footer>
+    </div>
+
+    <script>
+        const CONFIG = { fishScale: 2.0, rippleThickness: 8.0 };
+        const SHADOW_COLOR = 'rgba(43, 48, 58, 0.055)';
+        const [SHADOW_OFFSET_X, SHADOW_OFFSET_Y] = [18, 24];
+
+        let activeForce = 'all';
+        const ripples = [], flock = [], count = 32;
+
+        let attractionPoint = null, attractionTimer = 0;
+        const attractionDuration = 150; 
+
+        // 动态生成按钮数据结构
+        const buttons = ['btn-sep', 'btn-ali', 'btn-coh'].map(id => ({
+            id, innerId: `${id}-inner`, element: null, x: 0, y: 0, w: 0, h: 0, dx: 0, dy: 0
+        }));
+
+        // 讲解文本映射表与动画过渡状态
+        let expAlpha = 0, displayedForce = null, displayTitle = "", displayDesc = "";
+
+        const EXPLANATIONS = {
+            separation: {
+                title: "分 离 力   /   S E P A R A T I O N",
+                desc: "物 种 自 我 保 护 意 识 的 体 现。 避 免 与 邻 近 同 伴 碰 撞， 保 持 安 全 距 离"
+            },
+            alignment: {
+                title: "对 齐 力   /   A L I G N M E N T",
+                desc: "群 体 协 同 运 动 的 发 动 机。 调 整 自 身 速 度 与 角 度， 与 邻 近 同 伴 步 调 一 致"
+            },
+            cohesion: {
+                title: "凝 聚 力   /   C O H E S I O N",
+                desc: "维 系 鱼 群 结 构 的 内 在 引 力。 向 邻 近 同 伴 的 中 心 靠 拢， 防 止 在 游 动 中 溃 散"
+            }
+        };
+
+        const THEME_COLORS = {
+            separation: [189, 75, 75],
+            alignment: [59, 122, 112],
+            cohesion: [202, 130, 57],
+            all: [43, 48, 58]
+        };
+
+        function updateButtonsGeometry() {
+            buttons.forEach(btn => {
+                const el = document.getElementById(btn.id);
+                const innerEl = document.getElementById(btn.innerId);
+                if (el && innerEl) {
+                    btn.element = innerEl;
+                    const rect = el.getBoundingClientRect();
+                    btn.x = rect.left + rect.width / 2;
+                    btn.y = rect.top + rect.height / 2;
+                    btn.w = rect.width;
+                    btn.h = rect.height;
+                }
+            });
+        }
+
+        // ==========================================
+        // 带有微弱色散效果的波纹类
+        // ==========================================
+        class Ripple {
+            constructor(x, y) {
+                this.x = x; this.y = y; this.age = 0; this.maxAge = 160; 
+                this.maxRadius = Math.max(windowWidth, windowHeight) * 0.75;
+            }
+            update() { return ++this.age < this.maxAge; }
+            draw() {
+                let progress = this.age / this.maxAge;
+                if (progress < 0 || progress > 1) return;
+
+                let easeProgress = 1 - Math.pow(1 - progress, 3);
+                let r = easeProgress * this.maxRadius;
+                let opacity = progress < 0.15 ? map(progress, 0, 0.15, 0, 1) : map(progress, 0.15, 1, 1, 0);
+                let weight = map(easeProgress, 0, 1, CONFIG.rippleThickness, 1.5);
+
+                noFill();
+                stroke(43, 48, 58, opacity * 35);
+                strokeWeight(weight * 1.15);
+                circle(this.x, this.y, r * 2 - 1);
+
+                strokeWeight(weight);
+                stroke(140, 235, 255, opacity * 140); circle(this.x - 0.8, this.y - 0.6, r * 2); // 青
+                stroke(255, 140, 140, opacity * 140); circle(this.x + 0.8, this.y + 0.6, r * 2); // 红
+                stroke(255, 255, 255, opacity * 210); circle(this.x, this.y, r * 2);             // 白
+            }
+        }
+
+        // ==========================================
+        // p5.js 生命周期方法
+        // ==========================================
+        function setup() {
+            createCanvas(windowWidth, windowHeight).parent('canvas-container');
+            updateButtonsGeometry();
+
+            for (let i = 0; i < count; i++) flock.push(new Boid(random(width), random(height)));
+
+            ['btn-sep', 'btn-ali', 'btn-coh'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) {
+                    el.addEventListener('mouseenter', () => {
+                        activeForce = el.getAttribute('data-force');
+                        createCircularRipple(btn => btn.id === id ? btn.x : mouseX, btn => btn.id === id ? btn.y : mouseY);
+                        const rect = el.getBoundingClientRect();
+                        createCircularRipple(rect.left + rect.width / 2, rect.top + rect.height / 2);
+                    });
+                    el.addEventListener('mouseleave', () => activeForce = 'all');
+                }
+            });
+        }
+
+        function windowResized() {
+            resizeCanvas(windowWidth, windowHeight);
+            updateButtonsGeometry();
+        }
+
+        function drawExplanationText() {
+            let desiredForce = (activeForce !== 'all') ? activeForce : null;
+
+            if (desiredForce !== displayedForce) {
+                expAlpha = lerp(expAlpha, 0, 0.15); // 先淡出
+                if (expAlpha < 0.05) {
+                    displayedForce = desiredForce;
+                    if (displayedForce) {
+                        displayTitle = EXPLANATIONS[displayedForce].title;
+                        displayDesc = EXPLANATIONS[displayedForce].desc;
+                    }
+                }
+            } else {
+                expAlpha = lerp(expAlpha, displayedForce ? 1.0 : 0.0, 0.08); // 后淡入
+            }
+
+            if (expAlpha > 0.01 && displayedForce) {
+                push();
+                textAlign(CENTER, CENTER);
+                textFont('Inter, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif');
+                
+                let posY = height * 0.22;
+                let rgb = THEME_COLORS[displayedForce] || THEME_COLORS.all;
+
+                // 绘制标题
+                textSize(20);
+                textStyle(BOLD);
+                fill(rgb[0], rgb[1], rgb[2], expAlpha * 220);
+                noStroke();
+                text(displayTitle, width / 2, posY);
+
+                // 绘制描述
+                textSize(12);
+                textStyle(NORMAL);
+                fill(43, 48, 58, expAlpha * 120);
+                text(displayDesc, width / 2, posY + 36);
+                pop();
+            }
+        }
+
+        function draw() {
+            background('#f4efe2');
+
+            if (attractionTimer > 0 && --attractionTimer === 0) attractionPoint = null;
+
+            // 1. 底层：讲解文本
+            drawExplanationText();
+
+            // 2. 中层：运行并绘制鱼群
+            for (let boid of flock) {
+                boid.flock(flock);
+                boid.update();
+                boid.draw();
+            }
+
+            // 3. 计算交互：鱼群对物理按钮的文字扰动
+            buttons.forEach(btn => {
+                let targetDx = 0, targetDy = 0;
+                for (let boid of flock) {
+                    let d = dist(boid.position.x, boid.position.y, btn.x, btn.y);
+                    if (d < 110) {
+                        let push = boid.velocity.copy().mult((1 - d / 110) * 10);
+                        targetDx += push.x; targetDy += push.y;
+                    }
+                }
+
+                let currentMag = Math.hypot(targetDx, targetDy);
+                if (currentMag > 14) {
+                    targetDx = (targetDx / currentMag) * 14;
+                    targetDy = (targetDy / currentMag) * 14;
+                }
+
+                btn.dx = lerp(btn.dx, targetDx, 0.12);
+                btn.dy = lerp(btn.dy, targetDy, 0.12);
+
+                if (btn.element) {
+                    btn.element.style.transform = `translate(${btn.dx.toFixed(2)}px, ${btn.dy.toFixed(2)}px)`;
+                }
+            });
+
+            // 4. 顶层：波纹和指针投影
+            for (let i = ripples.length - 1; i >= 0; i--) {
+                if (!ripples[i].update()) ripples.splice(i, 1);
+                else ripples[i].draw();
+            }
+
+            if (mouseX > 0 && mouseX < width && mouseY > 0 && mouseY < height) {
+                push();
+                translate(mouseX + SHADOW_OFFSET_X, mouseY + SHADOW_OFFSET_Y);
+                fill(SHADOW_COLOR); noStroke();
+                beginShape();
+                vertex(0, 0); vertex(0, 16); vertex(4.5, 12); vertex(8.5, 18.5);
+                vertex(10.5, 17); vertex(6.5, 11); vertex(12, 11);
+                endShape(CLOSE);
+                pop();
+            }
+        }
+
+        function mousePressed() {
+            if (mouseX > 0 && mouseX < width && mouseY > 0 && mouseY < height) {
+                let onButton = buttons.some(btn => 
+                    mouseX >= btn.x - btn.w / 2 && mouseX <= btn.x + btn.w / 2 &&
+                    mouseY >= btn.y - btn.h / 2 && mouseY <= btn.y + btn.h / 2
+                );
+                if (!onButton) {
+                    createCircularRipple(mouseX, mouseY);
+                    attractionPoint = createVector(mouseX, mouseY);
+                    attractionTimer = attractionDuration;
+                }
+            }
+        }
+
+        function createCircularRipple(x, y) { ripples.push(new Ripple(x, y)); }
+
+        // ==========================================
+        // 实体类定义 (Boid)
+        // ==========================================
+        class Boid {
+            constructor(x, y) {
+                this.position = createVector(x, y);
+                this.velocity = p5.Vector.random2D().setMag(2.0);
+                this.acceleration = createVector(0, 0);
+                this.maxSpeed = 2.4;
+                this.maxForce = 0.045;
+
+                // 引入个性化微随机缩放比例，保持在极其微妙的范围内
+                this.scaleFactor = random(0.85, 1.15);
+
+                this.history = [];
+                this.maxHistory = 65;
+                this.bodyCount = 45;
+                this.swimCycle = random(TWO_PI);
+
+                this.radiusSep = 70;
+                this.radiusAli = 120;
+                this.radiusCoh = 120;
+
+                this.currentColor = color(43, 48, 58);
+                this.currentAlpha = 0.75;
+                this.edgeFade = 1.0;
+
+                this.sepCircleAlpha = 0;
+                this.aliCircleAlpha = 0;
+                this.cohCircleAlpha = 0;
+            }
+
+            update() {
+                let targetVelocity = p5.Vector.add(this.velocity, this.acceleration);
+                let currentSpeed = constrain(targetVelocity.mag(), 1.2, this.maxSpeed);
+                let currentAngle = this.velocity.heading();
+                let targetAngle = (targetVelocity.magSq() > 0.001) ? targetVelocity.heading() : currentAngle;
+
+                let diff = targetAngle - currentAngle;
+                while (diff < -PI) diff += TWO_PI;
+                while (diff > PI) diff -= TWO_PI;
+                diff = constrain(diff, -0.045, 0.045);
+
+                this.velocity = p5.Vector.fromAngle(currentAngle + diff).setMag(currentSpeed);
+                this.position.add(this.velocity);
+                this.acceleration.mult(0);
+
+                // 扩宽越界重置的安全外边距，给残影留出足够的淡出空间
+                let dx = 0, dy = 0, margin = 200;
+                if (this.position.x < -margin) dx = width + margin * 2;
+                else if (this.position.x > width + margin) dx = -width - margin * 2;
+                if (this.position.y < -margin) dy = height + margin * 2;
+                else if (this.position.y > height + margin) dy = -height - margin * 2;
+
+                if (dx !== 0 || dy !== 0) {
+                    this.position.add(dx, dy);
+                    this.history.forEach(pt => pt.add(dx, dy));
+                }
+
+                this.history.unshift(this.position.copy());
+                if (this.history.length > this.maxHistory) this.history.pop();
+
+                // 摆动运动
+                this.swimCycle += this.velocity.mag() * 0.05 + 0.02;
+                let vNorm = createVector(-this.velocity.y, this.velocity.x).normalize();
+                this.applyForce(vNorm.mult(sin(this.swimCycle) * 0.03));
+
+                // 优化边缘淡出计算：修复负数取幂导致 NaN 从而使鱼突兀消失的 Bug，并让进出画面的过渡更加柔和
+                let minDist = Math.min(this.position.x, width - this.position.x, this.position.y, height - this.position.y);
+                if (minDist > 180) {
+                    this.edgeFade = 1.0;
+                } else if (minDist < -150) {
+                    this.edgeFade = 0.0;
+                } else {
+                    let t = map(minDist, -150, 180, 0, 1);
+                    this.edgeFade = Math.pow(t, 1.3);
+                }
+
+                // 状态颜色与力场圈不透明度插值
+                let activeRGB = THEME_COLORS[activeForce] || THEME_COLORS.all;
+                let targetAlpha = activeForce === 'all' ? 0.75 : 0.85;
+
+                this.currentColor = lerpColor(this.currentColor, color(activeRGB[0], activeRGB[1], activeRGB[2]), 0.06);
+                this.currentAlpha = lerp(this.currentAlpha, targetAlpha, 0.06);
+
+                this.sepCircleAlpha = lerp(this.sepCircleAlpha, (activeForce === 'separation') ? 0.08 : 0, 0.08);
+                this.aliCircleAlpha = lerp(this.aliCircleAlpha, (activeForce === 'alignment') ? 0.08 : 0, 0.08);
+                this.cohCircleAlpha = lerp(this.cohCircleAlpha, (activeForce === 'cohesion') ? 0.08 : 0, 0.08);
+            }
+
+            applyForce(force) { this.acceleration.add(force); }
+
+            flock(boids) {
+                let sep = createVector(), ali = createVector(), coh = createVector();
+                let sepTotal = 0, aliTotal = 0, cohTotal = 0;
+
+                // 结合个体缩放比例计算物理感知半径
+                let activeScale = CONFIG.fishScale * this.scaleFactor;
+                let scaleMult = 1.0 + (activeScale - 1.0) * 0.5;
+                let dynamicSepRadius = this.radiusSep * activeScale;
+                let dynamicAliRadius = this.radiusAli * scaleMult;
+                let dynamicCohRadius = this.radiusCoh * scaleMult;
+
+                for (let other of boids) {
+                    if (other === this) continue;
+                    let d = p5.Vector.dist(this.position, other.position);
+                    if (d < dynamicSepRadius) { sep.add(p5.Vector.sub(this.position, other.position).div(d)); sepTotal++; }
+                    if (d < dynamicAliRadius) { ali.add(other.velocity); aliTotal++; }
+                    if (d < dynamicCohRadius) { coh.add(other.position); cohTotal++; }
+                }
+
+                if (sepTotal > 0) sep.div(sepTotal).setMag(this.maxSpeed).sub(this.velocity).limit(this.maxForce * 1.5);
+                if (aliTotal > 0) ali.div(aliTotal).setMag(this.maxSpeed).sub(this.velocity).limit(this.maxForce);
+                if (cohTotal > 0) coh.div(cohTotal).sub(this.position).setMag(this.maxSpeed).sub(this.velocity).limit(this.maxForce * 0.8);
+
+                let clickForce = createVector();
+                if (attractionPoint) {
+                    let desired = p5.Vector.sub(attractionPoint, this.position).setMag(this.maxSpeed);
+                    clickForce = p5.Vector.sub(desired, this.velocity).limit(this.maxForce * 4.5 * (attractionTimer / attractionDuration));
+                }
+
+                if (activeForce === 'all') {
+                    sep.mult(1.6); ali.mult(1.0); coh.mult(1.0);
+                } else {
+                    sep.mult(activeForce === 'separation' ? 3.0 : 0.01);
+                    ali.mult(activeForce === 'alignment' ? 3.0 : 0.01);
+                    coh.mult(activeForce === 'cohesion' ? 3.0 : 0.01);
+                }
+
+                this.applyForce(sep); this.applyForce(ali); this.applyForce(coh); this.applyForce(clickForce);
+            }
+
+            drawResidue(offsetX = 0, offsetY = 0, renderMode = 'main') {
+                if (this.history.length < 2) return;
+
+                // 结合个体缩放比例进行绘制
+                const fishScale = CONFIG.fishScale * this.scaleFactor;
+                const drawCount = Math.min(this.bodyCount, this.history.length);
+
+                let scaledPath = [];
+                let currentPos = this.history[0].copy();
+                scaledPath.push(currentPos.copy());
+
+                for (let i = 1; i < this.history.length; i++) {
+                    scaledPath.push(currentPos.add(p5.Vector.sub(this.history[i], this.history[i-1]).mult(fishScale)).copy());
+                }
+
+                let lefts = [], rights = [];
+                for (let i = 0; i < drawCount; i++) {
+                    let p = scaledPath[i];
+                    let next = (i + 1 < scaledPath.length) ? scaledPath[i + 1] : p;
+                    let prev = (i - 1 >= 0) ? scaledPath[i - 1] : p;
+
+                    let dx = prev.x - next.x, dy = prev.y - next.y;
+                    let len = Math.hypot(dx, dy);
+                    let nx = len > 0 ? -dy / len : 0, ny = len > 0 ? dx / len : 0;
+
+                    let t = drawCount > 1 ? i / (drawCount - 1) : 0;
+                    let w = t < 0.2 ? sin((t / 0.2) * HALF_PI) :
+                            t < 0.5 ? 1.0 - 0.35 * sq((t - 0.2) / 0.3) :
+                            0.65 * Math.pow(1 - (t - 0.5) / 0.5, 1.5);
+                    w *= 11.5 * fishScale;
+
+                    lefts.push({ x: p.x + offsetX + nx * w, y: p.y + offsetY + ny * w });
+                    rights.push({ x: p.x + offsetX - nx * w, y: p.y + offsetY - ny * w });
+                }
+
+                let finalAlpha = this.currentAlpha * this.edgeFade;
+                let origR = red(this.currentColor), origG = green(this.currentColor), origB = blue(this.currentColor);
+                let finalColor;
+
+                if (renderMode === 'shadow') {
+                    finalColor = color(43, 48, 58, finalAlpha * 14.0);
+                } else if (renderMode === 'cyan') {
+                    finalColor = color(origR * 0.15, constrain(origG * 1.3, 0, 255), constrain(origB * 1.6, 0, 255), finalAlpha * 140);
+                } else if (renderMode === 'red') {
+                    finalColor = color(constrain(origR * 1.6, 0, 255), origG * 0.15, origB * 0.15, finalAlpha * 140);
+                } else {
+                    finalColor = color(origR, origG, origB, finalAlpha * 255);
+                }
+
+                if (renderMode === 'main') {
+                    drawingContext.shadowBlur = 10 * fishScale;
+                    drawingContext.shadowColor = `rgba(255, 255, 255, ${finalAlpha * 0.6})`;
+                }
+
+                fill(finalColor); noStroke();
+                beginShape();
+                vertex(rights[0].x, rights[0].y);
+                for (let i = 1; i < rights.length; i++) vertex(rights[i].x, rights[i].y);
+                vertex(lefts[lefts.length - 1].x, lefts[lefts.length - 1].y);
+                for (let i = lefts.length - 2; i >= 0; i--) vertex(lefts[i].x, lefts[i].y);
+                endShape(CLOSE);
+
+                if (this.history.length > drawCount) {
+                    push(); noFill(); strokeWeight(fishScale);
+                    let trailColor = color(finalColor);
+                    trailColor.setAlpha(renderMode === 'main' ? finalAlpha * 90 : finalAlpha * 45); 
+                    stroke(renderMode === 'shadow' ? color(43, 48, 58, finalAlpha * 14) : trailColor);
+                    beginShape();
+                    for (let i = drawCount - 1; i < scaledPath.length; i++) vertex(scaledPath[i].x + offsetX, scaledPath[i].y + offsetY);
+                    endShape();
+                    pop();
+                }
+
+                if (renderMode === 'main') drawingContext.shadowBlur = 0;
+            }
+
+            draw() {
+                this.drawResidue(SHADOW_OFFSET_X, SHADOW_OFFSET_Y, 'shadow'); // 阴影
+
+                const fishScale = CONFIG.fishScale * this.scaleFactor;
+                push();
+                translate(this.position.x, this.position.y);
+                noFill(); strokeWeight(1.0);
+                if (this.sepCircleAlpha > 0.002) { stroke(189, 75, 75, this.sepCircleAlpha * this.edgeFade * 255); circle(0, 0, this.radiusSep * fishScale * 2); }
+                if (this.aliCircleAlpha > 0.002) { stroke(59, 122, 112, this.aliCircleAlpha * this.edgeFade * 255); circle(0, 0, this.radiusAli * fishScale * 2); }
+                if (this.cohCircleAlpha > 0.002) { stroke(202, 130, 57, this.cohCircleAlpha * this.edgeFade * 255); circle(0, 0, this.radiusCoh * fishScale * 2); }
+                pop();
+
+                let speedFactor = map(this.velocity.mag(), 1.2, this.maxSpeed, 0.7, 1.3);
+                let [shiftX, shiftY] = [1.4 * speedFactor, 1.0 * speedFactor];
+
+                this.drawResidue(-shiftX, -shiftY, 'cyan'); // 偏斜幻影-青
+                this.drawResidue(shiftX, shiftY, 'red');    // 偏斜幻影-红
+                this.drawResidue(0, 0, 'main');             // 主躯干
+            }
+        }
+    </script>
+</body>
+</html>
